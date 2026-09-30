@@ -29,6 +29,44 @@ def init_db():
             plate_id TEXT, plate_width REAL, plate_length REAL,
             utilization REAL, layout_json TEXT, created_at TEXT
         )""")
+
+        # ---- Automatic database migration for older V1/V2 databases ----
+        # Streamlit may keep an older nesting.db between code updates.
+        plate_cols = {row[1] for row in c.execute("PRAGMA table_info(plates)").fetchall()}
+        plate_migrations = {
+            "source": "TEXT DEFAULT 'STOCK'",
+            "parent_plate": "TEXT",
+            "status": "TEXT DEFAULT 'AVAILABLE'",
+            "heat_no": "TEXT DEFAULT ''",
+            "location": "TEXT DEFAULT ''",
+            "created_at": "TEXT"
+        }
+        for col, definition in plate_migrations.items():
+            if col not in plate_cols:
+                c.execute(f"ALTER TABLE plates ADD COLUMN {col} {definition}")
+
+        run_cols = {row[1] for row in c.execute("PRAGMA table_info(runs)").fetchall()}
+        run_migrations = {
+            "project": "TEXT",
+            "material": "TEXT",
+            "thickness": "REAL",
+            "plate_id": "TEXT",
+            "plate_width": "REAL",
+            "plate_length": "REAL",
+            "utilization": "REAL",
+            "layout_json": "TEXT",
+            "created_at": "TEXT"
+        }
+        for col, definition in run_migrations.items():
+            if col not in run_cols:
+                c.execute(f"ALTER TABLE runs ADD COLUMN {col} {definition}")
+
+        # Normalize NULL values inherited from old databases.
+        c.execute("UPDATE plates SET source='STOCK' WHERE source IS NULL OR source=''")
+        c.execute("UPDATE plates SET status='AVAILABLE' WHERE status IS NULL OR status=''")
+        c.execute("UPDATE plates SET heat_no='' WHERE heat_no IS NULL")
+        c.execute("UPDATE plates SET location='' WHERE location IS NULL")
+
         if c.execute("SELECT COUNT(*) FROM plates").fetchone()[0] == 0:
             seed = [
                 ("S516N-10-001","SA-516 Gr.70N",10,2000,6000,"H-T001","Rack A1"),
@@ -52,7 +90,16 @@ def init_db():
 
 def inventory():
     with db() as c:
-        return pd.read_sql_query("SELECT * FROM plates ORDER BY status, source DESC, material, thickness, plate_id",c)
+        df = pd.read_sql_query("SELECT * FROM plates ORDER BY status, source DESC, material, thickness, plate_id",c)
+    expected = {
+        "plate_id":"", "material":"", "thickness":0.0, "width":0.0, "length":0.0,
+        "source":"STOCK", "parent_plate":"", "status":"AVAILABLE",
+        "heat_no":"", "location":""
+    }
+    for col, default in expected.items():
+        if col not in df.columns:
+            df[col] = default
+    return df
 
 def runs():
     with db() as c:
