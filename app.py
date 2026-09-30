@@ -226,6 +226,26 @@ def approve(project,plate,placed,min_remnant=300):
              plate.get("heat_no",""),plate.get("location",""),now))
     return run_id,util,(rem_w,rem_l) if rem_w>=min_remnant and rem_l>=min_remnant else None
 
+
+def safe_layout(value):
+    """Return a saved layout list, or None for legacy/invalid run records."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, (str, bytes, bytearray)):
+        return None
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
 # ---------------- UI ----------------
 st.set_page_config(page_title="Plate Nesting V2",page_icon="✂️",layout="wide")
 init_db()
@@ -310,25 +330,51 @@ with t2:
 with t3:
     rh=runs()
     if rh.empty:
-        st.info("No approved cutting runs yet. Approve a nest first.")
+        st.info("No approved cutting runs yet. Approve a new nest first.")
     else:
-        labels=[f'{r.run_id} | {r.plate_id} | {r.project}' for _,r in rh.iterrows()]
-        choice=st.selectbox("Select used plate / cutting run",labels)
-        r=rh.iloc[labels.index(choice)]
-        plate={"plate_id":r.plate_id,"width":r.plate_width,"length":r.plate_length}
-        placed=json.loads(r.layout_json)
-        st.pyplot(layout_figure(plate,placed,0,f"{r.run_id} — {r.project} | RED used / GREEN balance"))
-        a,b,c=st.columns(3)
-        a.metric("Material",r.material);b.metric("Thickness",f"{r.thickness:g} mm");c.metric("Utilization",f"{r.utilization:.1f}%")
-        st.download_button("Download Historical DXF",dxf_bytes(plate,placed),
-                           file_name=f'{r.run_id}_{r.plate_id}.dxf',mime="application/dxf")
+        # Older V1 run records do not contain saved geometry/layout_json.
+        # Keep them in Run History, but do not try to draw them.
+        valid_indices=[]
+        for idx,r in rh.iterrows():
+            layout=safe_layout(r.get("layout_json"))
+            pw=r.get("plate_width")
+            pl=r.get("plate_length")
+            if layout is not None and pd.notna(pw) and pd.notna(pl):
+                valid_indices.append(idx)
+
+        valid=rh.loc[valid_indices].copy() if valid_indices else pd.DataFrame()
+        legacy_count=len(rh)-len(valid_indices)
+
+        if legacy_count:
+            st.info(f"{legacy_count} legacy run(s) are preserved in Run History but cannot be visualized because V1 did not save cutting-layout geometry.")
+
+        if valid.empty:
+            st.warning("No visual cutting layouts are available yet. Create and approve one new V2.2 nest, then it will appear here.")
+        else:
+            labels=[f'{r.run_id} | {r.plate_id} | {r.project}' for _,r in valid.iterrows()]
+            choice=st.selectbox("Select used plate / cutting run",labels)
+            pos=labels.index(choice)
+            r=valid.iloc[pos]
+            placed=safe_layout(r.get("layout_json")) or []
+            plate={"plate_id":r.plate_id,"width":float(r.plate_width),"length":float(r.plate_length)}
+            st.pyplot(layout_figure(plate,placed,0,f"{r.run_id} — {r.project} | RED used / GREEN balance"))
+            a,b,c=st.columns(3)
+            a.metric("Material",r.material if pd.notna(r.material) else "-")
+            b.metric("Thickness",f"{float(r.thickness):g} mm" if pd.notna(r.thickness) else "-")
+            c.metric("Utilization",f"{float(r.utilization):.1f}%" if pd.notna(r.utilization) else "-")
+            st.download_button("Download Historical DXF",dxf_bytes(plate,placed),
+                               file_name=f'{r.run_id}_{r.plate_id}.dxf',mime="application/dxf")
 
 with t4:
     rh=runs()
-    if rh.empty:st.info("No runs recorded.")
+    if rh.empty:
+        st.info("No runs recorded.")
     else:
-        st.dataframe(rh[["run_id","project","material","thickness","plate_id","utilization","created_at"]],
-                     use_container_width=True,hide_index=True)
+        wanted=["run_id","project","material","thickness","plate_id","utilization","created_at"]
+        for col in wanted:
+            if col not in rh.columns:
+                rh[col]=""
+        st.dataframe(rh[wanted],use_container_width=True,hide_index=True)
         st.download_button("Download Run History CSV",rh.to_csv(index=False).encode(),
                            file_name="nesting_run_history.csv",mime="text/csv")
 
